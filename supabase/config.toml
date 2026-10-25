@@ -1,0 +1,5 @@
+[functions.j3fx-calls]
+verify_jwt = false
+
+[functions.j3fx-push]
+verify_jwt = false

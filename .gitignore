@@ -1,0 +1,17 @@
+node_modules/
+dist/
+release/
+android/.gradle/
+android/local.properties
+android/build/
+android/app/build/
+ios/Pods/
+ios/App/Pods/
+ios/App/build/
+ios/App/DerivedData/
+.env*
+!.env.example
+.DS_Store
+google-services.json
+GoogleService-Info.plist
+supabase/.temp/
