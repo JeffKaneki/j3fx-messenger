@@ -41,7 +41,7 @@ Calls use the browser's built-in WebRTC APIs. Audio/video media flows directly b
 - Audio calls request audio only and never access the camera.
 - Incoming calls play `public/ringtone.mp3` while the app is open. To change the sound, put an MP3 named `ringtone.mp3` in the root `public/` folder (replace the file when changing it). If that file is missing, the built-in two-tone fallback is used. If the browser/WebView blocks autoplay, the incoming-call prompt provides an **Enable ringtone** button. Background/closed-app ringing requires push notifications and is not included.
 - Video requests up to 320×240 at 12 FPS, caps the initial video sender bitrate at 180 kbit/s, reduces it when measured network quality is poor, and offers an audio-only fallback. Actual usage varies by codec, network, packet overhead, and the remote peer; it is not guaranteed to be lower than a hosted SDK.
-- Declined and missed calls, plus ended calls with their accepted-to-ended duration, appear as call-history cards in the conversation. When the recipient declines, the caller sees a brief decline screen before returning to the chat.
+- Declined and missed calls, plus ended calls with their accepted-to-ended duration, appear inline in the same timestamp-sorted conversation timeline as messages. Images can be previewed and downloaded; other attachments open as downloads with their original filename. Attachments are limited to 50 MB. When the recipient declines, the caller sees a brief decline screen before returning to the chat.
 - Public STUN is used for address discovery. TURN is optional relaying for restrictive networks. Coturn is free/open-source software, but a hosted server, bandwidth, and egress may cost money.
 - WebRTC secures media transport between peers, but this app does not add application-level end-to-end encryption. Signaling includes SDP and ICE candidates, which can expose network address information to the other participant. No call recording is implemented.
 
@@ -109,7 +109,7 @@ The same React interface and Supabase backend are used on all targets. Android f
 - Attachment picker/upload, signed URL opening for authorized storage objects, and visible sent/delivered/read status.
 - Live people search by display name or username, message search within a conversation, presence timestamps, profile-photo upload, local chat themes, and per-conversation nicknames.
 - Inbox-wide realtime updates when messages, membership, or profile changes occur.
-- Center-cropped 1:1 profile-photo confirmation and receiver-authorized private image attachments with full-screen viewing.
+- Center-cropped 1:1 profile-photo confirmation and receiver-authorized private attachments with image preview and download.
 - A 5-second synchronization fallback repairs missed Realtime events without requiring a browser reload.
 - One-to-one peer-to-peer WebRTC calls with authenticated Supabase signaling, low-data video constraints, audio-only fallback, and optional temporary TURN credentials.
 

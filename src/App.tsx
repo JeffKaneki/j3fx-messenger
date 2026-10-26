@@ -14,13 +14,17 @@ type Profile = { id: string; username: string; display_name: string; avatar_url:
 type Conversation = { id: string; title: string | null; is_group: boolean; updated_at: string; other: Profile; nickname?: string | null }
 type Message = { id: string; conversation_id: string; sender_id: string; body: string; client_id: string; created_at: string; status: string; edited_at?: string | null; deleted_at?: string | null }
 type Reaction = { message_id: string; user_id: string; reaction: string }
-type QueueItem = { clientId: string; conversationId: string; body: string }
+type QueueItem = { clientId: string; conversationId: string; body: string; createdAt?: string }
 type Attachment = { id: string; message_id: string; mime_type: string; byte_size: number; storage_path: string }
 type Receipt = { message_id: string; user_id: string; delivered_at: string | null; read_at: string | null }
 type CallType = 'audio' | 'video'
 type CallSession = { id: string; conversation_id: string; caller_id: string; callee_id: string; call_type: CallType; status: string; created_at: string; expires_at: string }
 type CallHistoryEntry = { id: string; conversation_id: string; caller_id: string; callee_id: string; call_type: CallType; status: string; created_at: string; accepted_at: string | null; ended_at: string | null }
 type ActiveCall = { id: string; conversationId: string; role: 'caller' | 'callee'; callType: CallType; peerName: string }
+type TimelineEntry =
+  | { kind: 'message'; timestamp: string; message: Message }
+  | { kind: 'call'; timestamp: string; call: CallHistoryEntry }
+  | { kind: 'queued'; timestamp: string; item: QueueItem }
 
 const queueKey = 'j3fx-message-outbox'
 
@@ -39,7 +43,7 @@ function presenceText(lastSeen?: string) { return isOnline(lastSeen) ? 'Online n
 function readQueue(): QueueItem[] {
   try {
     const value: unknown = JSON.parse(localStorage.getItem(queueKey) ?? '[]')
-    return Array.isArray(value) && value.every((item) => typeof item?.clientId === 'string' && typeof item?.conversationId === 'string' && typeof item?.body === 'string') ? value as QueueItem[] : []
+    return Array.isArray(value) && value.every((item) => typeof item?.clientId === 'string' && typeof item?.conversationId === 'string' && typeof item?.body === 'string' && (item?.createdAt === undefined || typeof item.createdAt === 'string')) ? value as QueueItem[] : []
   } catch {
     return []
   }
@@ -116,6 +120,7 @@ export default function App() {
   const [loadingOlder, setLoadingOlder] = useState(false)
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [attachments, setAttachments] = useState<Attachment[]>([])
+  const [attachmentErrors, setAttachmentErrors] = useState<Record<string, string>>({})
   const [receipts, setReceipts] = useState<Receipt[]>([])
   const [profileFile, setProfileFile] = useState<File | null>(null)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
@@ -627,7 +632,7 @@ export default function App() {
       return [...current.filter((reaction) => !loadedIds.has(reaction.message_id)), ...(reactionData ?? [])]
     })
     const { data: attachmentData, error: attachmentError } = attachmentResult
-    if (attachmentError) setError(attachmentError.message)
+    if (attachmentError) setMessagesLoadError({ conversationId, message: `Could not load attachments: ${attachmentError.message}` })
     else {
       const nextAttachments = attachmentData ?? []
       setAttachments((current) => [...current.filter((item) => !page.some((message) => message.id === item.message_id)), ...nextAttachments])
@@ -723,7 +728,7 @@ export default function App() {
   }, [selectedId])
 
   useEffect(() => {
-    if ((!messages.length && !outbox.length) || !scrollLatestPendingRef.current || suppressLatestScrollRef.current) return
+    if ((!messages.length && !outbox.length && !callHistory.length) || !scrollLatestPendingRef.current || suppressLatestScrollRef.current) return
     const scrollToLatest = () => {
       const list = messageListRef.current
       if (list) list.scrollTop = list.scrollHeight
@@ -735,7 +740,7 @@ export default function App() {
         scrollLatestPendingRef.current = false
       })
     })
-  }, [messages.length, selectedId, attachments.length, outbox.length])
+  }, [messages.length, selectedId, attachments.length, outbox.length, callHistory.length])
 
   useEffect(() => {
     if (!selectedId || !messages.length) return
@@ -869,18 +874,42 @@ export default function App() {
     setCropOffset({ x: 0, y: 0 })
   }
 
-  async function openAttachment(attachment: Attachment) {
+  function attachmentName(attachment: Attachment) {
+    const storedName = attachment.storage_path.split('/').pop() ?? 'attachment'
+    return storedName.replace(/^[0-9a-f-]{36}-/i, '') || 'attachment'
+  }
+
+  async function openAttachment(attachment: Attachment, download = false) {
     if (!supabase) return
-    const { data, error: urlError } = await supabase.storage.from('message-media').createSignedUrl(attachment.storage_path, 120)
+    const filename = attachmentName(attachment)
+    const { data, error: urlError } = await supabase.storage.from('message-media').createSignedUrl(
+      attachment.storage_path,
+      120,
+      download ? { download: filename } : undefined,
+    )
     if (urlError || !data) { setError(urlError?.message ?? 'Unable to open attachment.'); return }
-    if (attachment.mime_type.startsWith('image/')) setPreviewUrl(data.signedUrl)
-    else await openExternalUrl(data.signedUrl)
+    if (attachment.mime_type.startsWith('image/') && !download) setPreviewUrl(data.signedUrl)
+    else if (download && !Capacitor.isNativePlatform()) {
+      const link = document.createElement('a')
+      link.href = data.signedUrl
+      link.download = filename
+      link.rel = 'noopener'
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+    } else await openExternalUrl(data.signedUrl)
   }
 
   async function loadAttachmentUrl(attachment: Attachment, attempt = 0) {
     if (!supabase) return
     const { data, error } = await supabase.storage.from('message-media').createSignedUrl(attachment.storage_path, 300, { transform: { width: 720, height: 520, resize: 'contain', quality: 78 } })
     if (data?.signedUrl) {
+      setAttachmentErrors((current) => {
+        if (!(attachment.id in current)) return current
+        const next = { ...current }
+        delete next[attachment.id]
+        return next
+      })
       setAttachmentUrls((current) => ({ ...current, [attachment.id]: data.signedUrl }))
       return
     }
@@ -890,7 +919,17 @@ export default function App() {
     }
     if (error) {
       const fallback = await supabase.storage.from('message-media').createSignedUrl(attachment.storage_path, 300)
-      if (fallback.data?.signedUrl) setAttachmentUrls((current) => ({ ...current, [attachment.id]: fallback.data.signedUrl }))
+      if (fallback.data?.signedUrl) {
+        setAttachmentErrors((current) => {
+          if (!(attachment.id in current)) return current
+          const next = { ...current }
+          delete next[attachment.id]
+          return next
+        })
+        setAttachmentUrls((current) => ({ ...current, [attachment.id]: fallback.data.signedUrl }))
+      } else {
+        setAttachmentErrors((current) => ({ ...current, [attachment.id]: fallback.error?.message ?? error.message }))
+      }
     }
   }
 
@@ -967,13 +1006,6 @@ export default function App() {
     const { error: deleteError } = await supabase.rpc('delete_my_account')
     if (deleteError) setError(deleteError.message)
     else await supabase.auth.signOut()
-  }
-
-  async function downloadAttachment(attachment: Attachment) {
-    if (!supabase) return
-    const { data, error: downloadError } = await supabase.storage.from('message-media').createSignedUrl(attachment.storage_path, 120)
-    if (downloadError || !data) { setError(downloadError?.message ?? 'Unable to create a download URL.'); return }
-    await openExternalUrl(data.signedUrl)
   }
 
   async function authenticate(event: FormEvent) {
@@ -1088,8 +1120,12 @@ export default function App() {
     event.preventDefault()
     const body = composer.trim()
     if ((!body && !selectedFile) || !selectedId || !session || !supabase) return
+    if (selectedFile && selectedFile.size > 50 * 1024 * 1024) {
+      setMessageSendError({ conversationId: selectedId, message: 'Attachments must be 50 MB or smaller.' })
+      return
+    }
     const clientId = crypto.randomUUID()
-    const item = { clientId, conversationId: selectedId, body: body || 'Attachment' }
+    const item = { clientId, conversationId: selectedId, body: body || 'Attachment', createdAt: new Date().toISOString() }
     if (!navigator.onLine) {
       if (selectedFile) {
         setMessageSendError({ conversationId: selectedId, message: 'Attachments cannot be queued while offline. Reconnect before sending this file.' })
@@ -1213,6 +1249,74 @@ export default function App() {
   }
   useEffect(() => { window.addEventListener('online', flushOutbox); void flushOutbox(); return () => window.removeEventListener('online', flushOutbox) }, [session, selectedId, outbox.length])
 
+  const timelineEntries = useMemo<TimelineEntry[]>(() => [
+    ...messages.map((message): TimelineEntry => ({ kind: 'message', timestamp: message.created_at, message })),
+    ...callHistory.map((call): TimelineEntry => ({ kind: 'call', timestamp: call.created_at, call })),
+    ...outbox
+      .filter((item) => item.conversationId === selectedId)
+      .map((item): TimelineEntry => ({ kind: 'queued', timestamp: item.createdAt ?? new Date().toISOString(), item })),
+  ].sort((left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp)), [messages, callHistory, outbox, selectedId])
+
+  function renderTimelineEntry(entry: TimelineEntry) {
+    if (entry.kind === 'call') {
+      const { call } = entry
+      const duration = call.status === 'ended' ? formatCallDuration(call.accepted_at, call.ended_at) : ''
+      const state = call.status === 'declined' ? 'Call declined' : call.status === 'missed' ? 'Missed call' : 'Call ended'
+      return <div className={`call-history-row ${call.caller_id === session?.user.id ? 'mine' : ''}`} key={`call-${call.id}`}>
+        <div className="call-history-card">
+          <span className="call-history-icon" aria-hidden="true">{call.call_type === 'video' ? '▣' : '◖'}</span>
+          <span className="call-history-copy">
+            <strong>{call.call_type === 'video' ? 'Video call' : 'Voice call'}</strong>
+            <span>{state}</span>
+            {duration && <small>{duration}</small>}
+          </span>
+          <time>{formatTime(call.created_at)}</time>
+        </div>
+      </div>
+    }
+
+    if (entry.kind === 'queued') {
+      return <div className="message-row mine message-pending" key={`queued-${entry.item.clientId}`}>
+        <div className="bubble">
+          {entry.item.body}
+          <small>Not delivered · queued on this device</small>
+        </div>
+      </div>
+    }
+
+    const { message } = entry
+    const count = reactions.filter((reaction) => reaction.message_id === message.id && reaction.reaction === 'heart').length
+    const messageAttachments = attachments.filter((attachment) => attachment.message_id === message.id)
+    return <div className={`message-row ${message.sender_id === session?.user.id ? 'mine' : ''}`} key={`message-${message.id}`}>
+      <div className="bubble">
+        {message.body}{message.edited_at && <i className="edited"> edited</i>}
+        {messageAttachments.map((attachment) => attachment.mime_type.startsWith('image/')
+          ? <div className="attachment-actions" key={attachment.id}>
+              <button className="image-attachment" onClick={() => void openAttachment(attachment)} aria-label={`View ${attachmentName(attachment)}`}>
+                <span className="image-attachment-frame">
+                  {attachmentUrls[attachment.id]
+                    ? <img loading="lazy" decoding="async" src={attachmentUrls[attachment.id]} alt={attachmentName(attachment)} onLoad={() => {
+                        const list = messageListRef.current
+                        if (list && (scrollLatestPendingRef.current || list.scrollHeight - list.scrollTop - list.clientHeight < 120)) list.scrollTop = list.scrollHeight
+                      }} onError={() => void loadAttachmentUrl(attachment)} />
+                    : <span className="image-loading">{attachmentErrors[attachment.id] ? 'Preview unavailable' : 'Loading image…'}</span>}
+                </span>
+              </button>
+              <button className="attachment-download" onClick={() => void openAttachment(attachment, true)}>Download image</button>
+            </div>
+          : <button className="attachment-link" key={attachment.id} onClick={() => void openAttachment(attachment, true)}>
+              Download {attachmentName(attachment)} ({Math.ceil(attachment.byte_size / 1024)} KB)
+            </button>)}
+        <div className="message-actions">
+          <button onClick={() => void toggleReaction(message.id)} aria-label="React with heart">❤️</button>
+          {message.sender_id === session?.user.id && <><button onClick={() => void editMessage(message)} aria-label="Edit message">✎</button><button onClick={() => void deleteMessage(message)} aria-label="Delete message">×</button></>}
+        </div>
+        <small>{formatTime(message.created_at)} {message.sender_id === session?.user.id ? '· ' + (receipts.some((receipt) => receipt.message_id === message.id && receipt.read_at) ? 'read' : receipts.some((receipt) => receipt.message_id === message.id && receipt.delivered_at) ? 'delivered' : message.status) : ''}</small>
+        {count > 0 && <span className="reaction-badge" title={`${count} heart reaction${count === 1 ? '' : 's'}`}>❤️{count > 1 ? ` ${count}` : ''}</span>}
+      </div>
+    </div>
+  }
+
   const visibleConversations = useMemo(() => conversations.filter((item) => (conversationFilter === 'all' || item.is_group) && ((item.title ?? item.other.display_name).toLowerCase().includes(search.toLowerCase()) || item.other.display_name.toLowerCase().includes(search.toLowerCase()) || item.other.username.toLowerCase().includes(search.toLowerCase()))), [conversations, search, conversationFilter])
   if (!session) return <AuthScreen {...{ authMode, setAuthMode, email, setEmail, password, setPassword, displayName, setDisplayName, error, authenticate }} />
   const selected = conversations.find((item) => item.id === selectedId)
@@ -1243,7 +1347,7 @@ export default function App() {
       </div>
     </div>}
     <section className="chat">
-      {!selected ? <div className="welcome"><div className="welcome-mark">✦</div><h1>Your conversations,<br /><em>kept in sync.</em></h1><p>Choose a conversation to start messaging. Your history lives securely in Supabase and follows you across devices.</p></div> : <><header className="chat-header"><button className="mobile-back" onClick={() => setSelectedId(null)} aria-label="Back to conversations"><BackIcon /></button><div className="avatar-wrap"><div className="avatar">{selected.other.avatar_url ? <img src={selected.other.avatar_url} alt="" /> : initials(selected.title ?? selected.other.display_name)}</div><span className={`presence-indicator header-presence ${isOnline(selected.other.last_seen_at) ? 'online' : 'offline'}`} title={presenceText(selected.other.last_seen_at)} /></div><div className="chat-title"><strong>{selected.title ?? selected.nickname ?? selected.other.display_name}</strong><span><span className={`presence-label ${isOnline(selected.other.last_seen_at) ? 'online-text' : ''}`}>{presenceText(selected.other.last_seen_at)}</span>{selected.is_group ? ' · Group conversation' : ' · @' + selected.other.username}</span></div><div className="header-actions"><button className="circle-action" onClick={() => void startCall('audio')} disabled={selected.is_group || startingCall || Boolean(activeCall)} title="Start audio call"><img src={voiceCallIcon} alt="" /></button><button className="circle-action" onClick={() => void startCall('video')} disabled={selected.is_group || startingCall || Boolean(activeCall)} title="Start video call"><img src={videoCallIcon} alt="" /></button><button className="circle-action" onClick={() => setShowDetails((value) => !value)} title="Open chat information">ⓘ</button></div></header><form className="message-search" onSubmit={searchMessages}><input ref={messageSearchRef} placeholder="Search messages in this conversation" value={messageSearch} onChange={(event) => setMessageSearch(event.target.value)} /><button>{searchingMessages ? '…' : 'Search'}</button></form>                              <div ref={messageListRef} className="message-list">{messages.map((message) => { const count = reactions.filter((reaction) => reaction.message_id === message.id && reaction.reaction === 'heart').length; return <div className={`message-row ${message.sender_id === session.user.id ? 'mine' : ''}`} key={message.id}>      <div className="bubble">{message.body}{message.edited_at && <i className="edited"> edited</i>}{attachments.filter((attachment) => attachment.message_id === message.id).map((attachment) =>             attachment.mime_type.startsWith('image/') ? <button className="image-attachment" key={attachment.id} onClick={() => void openAttachment(attachment)}><span className="image-attachment-frame">{attachmentUrls[attachment.id] ?       <img loading="lazy" decoding="async" src={attachmentUrls[attachment.id]} alt="Sent attachment" onLoad={() => { const list = messageListRef.current; if (list && (scrollLatestPendingRef.current || list.scrollHeight - list.scrollTop - list.clientHeight < 120)) list.scrollTop = list.scrollHeight }} onError={() => void loadAttachmentUrl(attachment)} /> : <span className="image-loading">Loading image…</span>}</span></button> : <button className="attachment-link" key={attachment.id} onClick={() => void openAttachment(attachment)}>Open attachment ({Math.ceil(attachment.byte_size / 1024)} KB</button>)}<div className="message-actions">            <button onClick={() => void toggleReaction(message.id)} aria-label="React with heart">❤️</button>{message.sender_id === session.user.id && <><button onClick={() => void editMessage(message)} aria-label="Edit message">✎</button><button onClick={() => void deleteMessage(message)} aria-label="Delete message">×</button></>}</div>      <small>{formatTime(message.created_at)} {message.sender_id === session.user.id ? '· ' + (receipts.some((receipt) => receipt.message_id === message.id && receipt.read_at) ? 'read' : receipts.some((receipt) => receipt.message_id === message.id && receipt.delivered_at) ? 'delivered' : message.status) : ''}      </small>{count > 0 && <span className="reaction-badge" title={`${count} heart reaction${count === 1 ? '' : 's'}`}>❤️{count > 1 ? ` ${count}` : ''}</span>}</div></div> })}{!messages.length && <p className="empty center">No messages yet. Say hello.</p>}{hasOlderMessages && <button className="load-older" onClick={() => void loadOlderMessages()} disabled={loadingOlder}>{loadingOlder ? 'Loading…' : 'Load older messages'}</button>}      </div><form className="composer" onSubmit={sendMessage}><input ref={fileInput} className="file-input" type="file" accept="image/*,video/*,audio/*,application/pdf" onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)} />      <button type="button" className="attach-button" onClick={() => fileInput.current?.click()} aria-label="Attach file"><AttachIcon /></button><input value={composer} onChange={(event) => setComposer(event.target.value)} placeholder={selectedFile ? selectedFile.name : navigator.onLine ? 'Write a message…' : 'Offline — queued until reconnect'} />      <button className="send-button" disabled={!composer.trim() && !selectedFile} aria-label="Send message"><SendIcon /></button></form></>}
+      {!selected ? <div className="welcome"><div className="welcome-mark">✦</div><h1>Your conversations,<br /><em>kept in sync.</em></h1><p>Choose a conversation to start messaging. Your history lives securely in Supabase and follows you across devices.</p></div> : <><header className="chat-header"><button className="mobile-back" onClick={() => setSelectedId(null)} aria-label="Back to conversations"><BackIcon /></button><div className="avatar-wrap"><div className="avatar">{selected.other.avatar_url ? <img src={selected.other.avatar_url} alt="" /> : initials(selected.title ?? selected.other.display_name)}</div><span className={`presence-indicator header-presence ${isOnline(selected.other.last_seen_at) ? 'online' : 'offline'}`} title={presenceText(selected.other.last_seen_at)} /></div><div className="chat-title"><strong>{selected.title ?? selected.nickname ?? selected.other.display_name}</strong><span><span className={`presence-label ${isOnline(selected.other.last_seen_at) ? 'online-text' : ''}`}>{presenceText(selected.other.last_seen_at)}</span>{selected.is_group ? ' · Group conversation' : ' · @' + selected.other.username}</span></div><div className="header-actions"><button className="circle-action" onClick={() => void startCall('audio')} disabled={selected.is_group || startingCall || Boolean(activeCall)} title="Start audio call"><img src={voiceCallIcon} alt="" /></button><button className="circle-action" onClick={() => void startCall('video')} disabled={selected.is_group || startingCall || Boolean(activeCall)} title="Start video call"><img src={videoCallIcon} alt="" /></button><button className="circle-action" onClick={() => setShowDetails((value) => !value)} title="Open chat information">ⓘ</button></div></header><form className="message-search" onSubmit={searchMessages}><input ref={messageSearchRef} placeholder="Search messages in this conversation" value={messageSearch} onChange={(event) => setMessageSearch(event.target.value)} /><button>{searchingMessages ? '…' : 'Search'}</button></form>                              <div ref={messageListRef} className="message-list">{messages.map((message) => { const count = reactions.filter((reaction) => reaction.message_id === message.id && reaction.reaction === 'heart').length; return <div className={`message-row ${message.sender_id === session.user.id ? 'mine' : ''}`} key={message.id}>      <div className="bubble">{message.body}{message.edited_at && <i className="edited"> edited</i>}{attachments.filter((attachment) => attachment.message_id === message.id).map((attachment) =>             attachment.mime_type.startsWith('image/') ? <button className="image-attachment" key={attachment.id} onClick={() => void openAttachment(attachment)}><span className="image-attachment-frame">{attachmentUrls[attachment.id] ?       <img loading="lazy" decoding="async" src={attachmentUrls[attachment.id]} alt="Sent attachment" onLoad={() => { const list = messageListRef.current; if (list && (scrollLatestPendingRef.current || list.scrollHeight - list.scrollTop - list.clientHeight < 120)) list.scrollTop = list.scrollHeight }} onError={() => void loadAttachmentUrl(attachment)} /> : <span className="image-loading">Loading image…</span>}</span></button> : <button className="attachment-link" key={attachment.id} onClick={() => void openAttachment(attachment)}>Open attachment ({Math.ceil(attachment.byte_size / 1024)} KB</button>)}<div className="message-actions">            <button onClick={() => void toggleReaction(message.id)} aria-label="React with heart">❤️</button>{message.sender_id === session.user.id && <><button onClick={() => void editMessage(message)} aria-label="Edit message">✎</button><button onClick={() => void deleteMessage(message)} aria-label="Delete message">×</button></>}</div>      <small>{formatTime(message.created_at)} {message.sender_id === session.user.id ? '· ' + (receipts.some((receipt) => receipt.message_id === message.id && receipt.read_at) ? 'read' : receipts.some((receipt) => receipt.message_id === message.id && receipt.delivered_at) ? 'delivered' : message.status) : ''}      </small>{count > 0 && <span className="reaction-badge" title={`${count} heart reaction${count === 1 ? '' : 's'}`}>❤️{count > 1 ? ` ${count}` : ''}</span>}</div></div> })}{!messages.length && <p className="empty center">No messages yet. Say hello.</p>}{hasOlderMessages && <button className="load-older" onClick={() => void loadOlderMessages()} disabled={loadingOlder}>{loadingOlder ? 'Loading…' : 'Load older messages'}</button>}      </div><form className="composer" onSubmit={sendMessage}><input ref={fileInput} className="file-input" type="file" onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)} />      <button type="button" className="attach-button" onClick={() => fileInput.current?.click()} aria-label="Attach file"><AttachIcon /></button><input value={composer} onChange={(event) => setComposer(event.target.value)} placeholder={selectedFile ? selectedFile.name : navigator.onLine ? 'Write a message…' : 'Offline — queued until reconnect'} />      <button className="send-button" disabled={!composer.trim() && !selectedFile} aria-label="Send message"><SendIcon /></button></form></>}
       {previewUrl && <div className="image-modal" onClick={() => setPreviewUrl(null)}><img src={previewUrl} alt="Full-size attachment" /></div>}
       {cropSource && <div className="crop-modal"><div className="crop-panel"><h2>Crop profile photo</h2><p>Drag the image to choose the crop area.</p><div className="crop-viewport" onPointerDown={handleCropPointerDown} onPointerMove={handleCropPointerMove} onPointerUp={handleCropPointerUp} onPointerCancel={handleCropPointerUp}><img src={cropSource} alt="Crop preview" style={{ transform: `translate(${cropOffset.x}px, ${cropOffset.y}px) scale(${cropZoom})` }} /><div className="crop-guide" /></div><label className="crop-zoom">Zoom <input type="range" min="1" max="3" step="0.01" value={cropZoom} onChange={(event) => setCropZoom(Number(event.target.value))} /></label><div><button onClick={() => { URL.revokeObjectURL(cropSource); setCropSource(null); setProfileFile(null); setCropZoom(1); setCropOffset({ x: 0, y: 0 }) }}>Cancel</button><button className="primary crop-confirm" onClick={() => void uploadProfilePhoto()}>Use photo</button></div></div></div>}
     </section>
@@ -1259,36 +1363,10 @@ export default function App() {
       onRemoteEnd={finishRemoteCall}
       onError={setCallError}
     />}
-    {messageListRef.current && callHistory.length > 0 && createPortal(
-      <div className="call-history-feed" aria-label="Call history">
-        {callHistory.map((call) => {
-          const duration = call.status === 'ended' ? formatCallDuration(call.accepted_at, call.ended_at) : ''
-          const state = call.status === 'declined' ? 'Call declined' : call.status === 'missed' ? 'Missed call' : 'Call ended'
-          return <div className={`call-history-row ${call.caller_id === session.user.id ? 'mine' : ''}`} key={call.id}>
-            <div className="call-history-card">
-              <span className="call-history-icon" aria-hidden="true">{call.call_type === 'video' ? '▣' : '◖'}</span>
-              <span className="call-history-copy">
-                <strong>{call.call_type === 'video' ? 'Video call' : 'Voice call'}</strong>
-                <span>{state}</span>
-                {duration && <small>{duration}</small>}
-              </span>
-              <time>{formatTime(call.created_at)}</time>
-            </div>
-          </div>
-        })}
-      </div>,
-      messageListRef.current,
-    )}
     {messageListRef.current && selectedId && createPortal(
-      <div className="message-status-feed" aria-label="Message delivery status">
-        {outbox.filter((item) => item.conversationId === selectedId).map((item) => (
-          <div className="message-row mine message-pending" key={item.clientId}>
-            <div className="bubble">
-              {item.body}
-              <small>Not delivered · queued on this device</small>
-            </div>
-          </div>
-        ))}
+      <div className="unified-timeline" aria-label="Conversation timeline">
+        {timelineEntries.map(renderTimelineEntry)}
+        {!timelineEntries.length && messagesLoadError?.conversationId !== selectedId && <p className="empty center">No messages yet. Say hello.</p>}
         {messagesLoadError?.conversationId === selectedId && <div className="message-inline-error" role="alert">
           <span>Could not load messages: {messagesLoadError.message}</span>
           <button type="button" onClick={() => void loadMessages(selectedId)}>Retry</button>
@@ -1297,6 +1375,7 @@ export default function App() {
           <span>{messageSendError.message}</span>
           <button type="button" onClick={() => setMessageSendError(null)} aria-label="Dismiss message status">×</button>
         </div>}
+        {hasOlderMessages && <button className="load-older" onClick={() => void loadOlderMessages()} disabled={loadingOlder}>{loadingOlder ? 'Loading…' : 'Load older messages'}</button>}
       </div>,
       messageListRef.current,
     )}

@@ -286,6 +286,9 @@ html[data-theme="mint"] .account-delete{color:var(--muted)}
 .message-inline-error{display:flex;align-items:center;justify-content:space-between;gap:12px;max-width:min(680px,100%);margin:12px auto;padding:12px 14px;border:1px solid #e7a8ac;border-radius:12px;background:#fff0f0;color:#75232b;font-size:13px;line-height:1.5;overflow-wrap:anywhere}
 .message-inline-error button{flex:none;border:1px solid currentColor;border-radius:8px;padding:5px 9px;background:transparent;color:inherit;cursor:pointer}
 .message-list:has(.message-pending)>.empty.center,.message-list:has(.message-inline-error)>.empty.center{display:none}
+.attachment-actions{display:grid;justify-items:start;gap:6px;margin-top:8px}
+.attachment-actions .image-attachment{margin-top:0}
+.attachment-download{padding:5px 9px;border:1px solid #ffffff70;border-radius:8px;background:#ffffff18;color:inherit;font-size:11px;cursor:pointer}
 .call-progress{border-color:#a6dcc5;background:#edfff6;color:#17533b}
 @media(max-width:600px){.call-toolbar{min-height:52px;padding-left:12px;padding-right:12px}.call-incoming-card{padding:28px 20px}}
 @media(max-width:600px){.peer-call-controls{gap:7px;padding:10px 10px max(10px,env(safe-area-inset-bottom))}.peer-call-controls button,.peer-output-select{padding:9px 10px;font-size:12px}.peer-local-video{right:10px;bottom:calc(82px + env(safe-area-inset-bottom));width:min(32vw,170px);max-height:24dvh}.peer-network-note{bottom:calc(76px + env(safe-area-inset-bottom));font-size:10px}}
@@ -378,6 +381,8 @@ html[data-theme="mint"] .account-delete{color:var(--muted)}
 .call-terminal-message strong{font:600 clamp(24px,4vw,38px) 'Space Grotesk',sans-serif}
 .call-terminal-message small{color:#aebbd0;font-size:14px}
 .call-history-feed{display:grid;gap:9px;padding:12px 8%;pointer-events:none}
+.unified-timeline{display:contents}
+.message-list:has(>.unified-timeline)>.message-row,.message-list:has(>.unified-timeline)>.empty.center,.message-list:has(>.unified-timeline)>.load-older{display:none!important}
 .call-history-row{display:flex;justify-content:flex-start}
 .call-history-row.mine{justify-content:flex-end}
 .call-history-card{display:flex;align-items:center;gap:12px;min-width:215px;max-width:min(340px,80%);padding:10px 13px;border:1px solid #e1d8ea;border-radius:18px;background:#f2eaf7;color:#242237;box-shadow:0 5px 18px #29203a12}
