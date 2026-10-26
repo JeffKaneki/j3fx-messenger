@@ -90,6 +90,8 @@ export default function App() {
   const [hasMoreConversations, setHasMoreConversations] = useState(false)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
+  const [messagesLoadError, setMessagesLoadError] = useState<{ conversationId: string; message: string } | null>(null)
+  const [messageSendError, setMessageSendError] = useState<{ conversationId: string; message: string } | null>(null)
   const [composer, setComposer] = useState('')
   const [outbox, setOutbox] = useState<QueueItem[]>(readQueue)
   const [search, setSearch] = useState('')
@@ -600,7 +602,11 @@ export default function App() {
     let query = client.from('messages').select('*').eq('conversation_id', conversationId).order('created_at', { ascending: false }).limit(51)
     if (before) query = query.lt('created_at', before)
     const { data, error: queryError } = await query
-    if (queryError) { setError(queryError.message); return }
+    if (queryError) {
+      setMessagesLoadError({ conversationId, message: queryError.message })
+      return
+    }
+    setMessagesLoadError((current) => current?.conversationId === conversationId ? null : current)
     const page = (data ?? []).slice(0, 50).reverse()
     setHasOlderMessages((data ?? []).length > 50)
     setMessages((current) => before ? [...page, ...current] : page)
@@ -717,7 +723,7 @@ export default function App() {
   }, [selectedId])
 
   useEffect(() => {
-    if (!messages.length || !scrollLatestPendingRef.current || suppressLatestScrollRef.current) return
+    if ((!messages.length && !outbox.length) || !scrollLatestPendingRef.current || suppressLatestScrollRef.current) return
     const scrollToLatest = () => {
       const list = messageListRef.current
       if (list) list.scrollTop = list.scrollHeight
@@ -729,7 +735,7 @@ export default function App() {
         scrollLatestPendingRef.current = false
       })
     })
-  }, [messages.length, selectedId, attachments.length])
+  }, [messages.length, selectedId, attachments.length, outbox.length])
 
   useEffect(() => {
     if (!selectedId || !messages.length) return
@@ -785,7 +791,11 @@ export default function App() {
     if (!supabase || !selectedId || !messageSearch.trim()) return
     setSearchingMessages(true)
     const { data, error: searchError } = await supabase.from('messages').select('*').eq('conversation_id', selectedId).ilike('body', `%${messageSearch.trim()}%`).order('created_at', { ascending: true }).limit(100)
-    if (searchError) setError(searchError.message); else setMessages(data ?? [])
+    if (searchError) setMessagesLoadError({ conversationId: selectedId, message: searchError.message })
+    else {
+      setMessagesLoadError((current) => current?.conversationId === selectedId ? null : current)
+      setMessages(data ?? [])
+    }
     setSearchingMessages(false)
   }
 
@@ -1080,11 +1090,38 @@ export default function App() {
     if ((!body && !selectedFile) || !selectedId || !session || !supabase) return
     const clientId = crypto.randomUUID()
     const item = { clientId, conversationId: selectedId, body: body || 'Attachment' }
+    if (!navigator.onLine) {
+      if (selectedFile) {
+        setMessageSendError({ conversationId: selectedId, message: 'Attachments cannot be queued while offline. Reconnect before sending this file.' })
+        return
+      }
+      const next = [...outbox, item]
+      scrollLatestPendingRef.current = true
+      setOutbox(next)
+      localStorage.setItem(queueKey, JSON.stringify(next))
+      setComposer('')
+      setMessageSendError({ conversationId: selectedId, message: 'You are offline. This message is saved on this device and will retry when you reconnect.' })
+      return
+    }
     setComposer('')
-    if (!navigator.onLine) { const next = [...outbox, item]; setOutbox(next); localStorage.setItem(queueKey, JSON.stringify(next)); return }
     const { data, error: sendError } = await supabase.from('messages').insert({ conversation_id: selectedId, sender_id: session.user.id, body: body || 'Attachment', client_id: clientId }).select().single()
-    if (sendError) { setError(sendError.message); const next = [...outbox, item]; setOutbox(next); localStorage.setItem(queueKey, JSON.stringify(next)) }
+    if (sendError) {
+      setMessageSendError({
+        conversationId: selectedId,
+        message: selectedFile
+          ? `Message was not confirmed by the server. Your text and attachment are still here; retry after resolving this error: ${sendError.message}`
+          : `Message was not saved to the server yet. It is queued on this device and will retry: ${sendError.message}`,
+      })
+      if (selectedFile) {
+        setComposer(body)
+        return
+      }
+      const next = [...outbox, item]
+      setOutbox(next)
+      localStorage.setItem(queueKey, JSON.stringify(next))
+    }
     else if (data) {
+      setMessageSendError((current) => current?.conversationId === selectedId ? null : current)
       scrollLatestPendingRef.current = true
       setMessages((current) => current.some((message) => message.id === data.id) ? current : [...current, data])
       void notifyMessage(data.id)
@@ -1092,16 +1129,20 @@ export default function App() {
         const file = selectedFile
         const path = `${session.user.id}/${data.id}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`
         const { error: uploadError } = await supabase.storage.from('message-media').upload(path, file, { contentType: file.type, upsert: false })
-        if (uploadError) setError(uploadError.message)
+        if (uploadError) setMessageSendError({ conversationId: selectedId, message: `Message was sent, but the attachment upload failed: ${uploadError.message}` })
         else {
           const { data: attachmentData, error: metadataError } = await supabase.from('message_attachments').insert({ message_id: data.id, owner_id: session.user.id, storage_path: path, mime_type: file.type || 'application/octet-stream', byte_size: file.size }).select('*').single()
-          if (metadataError) setError(metadataError.message)
+          if (metadataError) setMessageSendError({ conversationId: selectedId, message: `Message was sent, but its attachment details could not be saved: ${metadataError.message}` })
           else if (attachmentData) {
             setAttachments((current) => [...current.filter((item) => item.id !== attachmentData.id), attachmentData])
             if (attachmentData.mime_type.startsWith('image/')) void loadAttachmentUrl(attachmentData)
           }
         }
       }
+    } else {
+      setMessageSendError({ conversationId: selectedId, message: 'The server did not confirm whether this message was saved. Please check the conversation before trying again.' })
+      setComposer(body)
+      return
     }
     setSelectedFile(null)
     void loadConversations()
@@ -1138,16 +1179,39 @@ export default function App() {
     for (const item of pending) {
       const { data, error: sendError } = await supabase.from('messages')
         .insert({ conversation_id: item.conversationId, sender_id: session.user.id, body: item.body, client_id: item.clientId })
-        .select('id')
+        .select('*')
         .single()
-      if (!sendError) {
-        pending.splice(pending.indexOf(item), 1)
-        if (data) void notifyMessage(data.id)
+      let savedMessage = data
+      if (sendError) {
+        const { data: existingMessage, error: lookupError } = await supabase.from('messages')
+          .select('*')
+          .eq('sender_id', session.user.id)
+          .eq('client_id', item.clientId)
+          .maybeSingle()
+        if (lookupError || !existingMessage) {
+          if (selectedId === item.conversationId) {
+            setMessageSendError({
+              conversationId: item.conversationId,
+              message: `Message is still queued on this device and was not confirmed by the server: ${lookupError?.message ?? sendError.message}`,
+            })
+          }
+          continue
+        }
+        savedMessage = existingMessage
+      }
+      pending.splice(pending.indexOf(item), 1)
+      if (savedMessage) {
+        if (selectedId === item.conversationId) {
+          scrollLatestPendingRef.current = true
+          setMessages((current) => current.some((message) => message.id === savedMessage.id) ? current : [...current, savedMessage])
+          setMessageSendError((current) => current?.conversationId === item.conversationId ? null : current)
+        }
+        void notifyMessage(savedMessage.id)
       }
     }
     setOutbox(pending); localStorage.setItem(queueKey, JSON.stringify(pending))
   }
-  useEffect(() => { window.addEventListener('online', flushOutbox); void flushOutbox(); return () => window.removeEventListener('online', flushOutbox) }, [session, outbox.length])
+  useEffect(() => { window.addEventListener('online', flushOutbox); void flushOutbox(); return () => window.removeEventListener('online', flushOutbox) }, [session, selectedId, outbox.length])
 
   const visibleConversations = useMemo(() => conversations.filter((item) => (conversationFilter === 'all' || item.is_group) && ((item.title ?? item.other.display_name).toLowerCase().includes(search.toLowerCase()) || item.other.display_name.toLowerCase().includes(search.toLowerCase()) || item.other.username.toLowerCase().includes(search.toLowerCase()))), [conversations, search, conversationFilter])
   if (!session) return <AuthScreen {...{ authMode, setAuthMode, email, setEmail, password, setPassword, displayName, setDisplayName, error, authenticate }} />
@@ -1212,6 +1276,27 @@ export default function App() {
             </div>
           </div>
         })}
+      </div>,
+      messageListRef.current,
+    )}
+    {messageListRef.current && selectedId && createPortal(
+      <div className="message-status-feed" aria-label="Message delivery status">
+        {outbox.filter((item) => item.conversationId === selectedId).map((item) => (
+          <div className="message-row mine message-pending" key={item.clientId}>
+            <div className="bubble">
+              {item.body}
+              <small>Not delivered · queued on this device</small>
+            </div>
+          </div>
+        ))}
+        {messagesLoadError?.conversationId === selectedId && <div className="message-inline-error" role="alert">
+          <span>Could not load messages: {messagesLoadError.message}</span>
+          <button type="button" onClick={() => void loadMessages(selectedId)}>Retry</button>
+        </div>}
+        {messageSendError?.conversationId === selectedId && <div className="message-inline-error" role="alert">
+          <span>{messageSendError.message}</span>
+          <button type="button" onClick={() => setMessageSendError(null)} aria-label="Dismiss message status">×</button>
+        </div>}
       </div>,
       messageListRef.current,
     )}

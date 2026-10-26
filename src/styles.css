@@ -281,6 +281,11 @@ html[data-theme="mint"] .account-delete{color:var(--muted)}
 .call-error{margin:16px 0 0;color:#ffb8bd;font-size:13px;line-height:1.5}
 .call-notice{position:fixed;right:18px;bottom:max(18px,env(safe-area-inset-bottom));z-index:50;display:flex;align-items:center;gap:14px;max-width:min(520px,calc(100vw - 36px));padding:12px 15px;border:1px solid #e8a1a5;border-radius:12px;background:#fff0f0;color:#75232b;box-shadow:0 8px 30px #15233a2e;font-size:13px}
 .call-notice button{border:0;background:none;color:inherit;font-size:20px;cursor:pointer}
+.message-pending .bubble{opacity:.72;border:1px dashed currentColor}
+.message-pending small{display:block;margin-top:5px}
+.message-inline-error{display:flex;align-items:center;justify-content:space-between;gap:12px;max-width:min(680px,100%);margin:12px auto;padding:12px 14px;border:1px solid #e7a8ac;border-radius:12px;background:#fff0f0;color:#75232b;font-size:13px;line-height:1.5;overflow-wrap:anywhere}
+.message-inline-error button{flex:none;border:1px solid currentColor;border-radius:8px;padding:5px 9px;background:transparent;color:inherit;cursor:pointer}
+.message-list:has(.message-pending)>.empty.center,.message-list:has(.message-inline-error)>.empty.center{display:none}
 .call-progress{border-color:#a6dcc5;background:#edfff6;color:#17533b}
 @media(max-width:600px){.call-toolbar{min-height:52px;padding-left:12px;padding-right:12px}.call-incoming-card{padding:28px 20px}}
 @media(max-width:600px){.peer-call-controls{gap:7px;padding:10px 10px max(10px,env(safe-area-inset-bottom))}.peer-call-controls button,.peer-output-select{padding:9px 10px;font-size:12px}.peer-local-video{right:10px;bottom:calc(82px + env(safe-area-inset-bottom));width:min(32vw,170px);max-height:24dvh}.peer-network-note{bottom:calc(76px + env(safe-area-inset-bottom));font-size:10px}}
